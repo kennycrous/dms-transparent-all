@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-set-opacity: Unified Window Background Transparency Manager for CachyOS + Niri + DMS
-Automates background transparency for GTK3/4, Terminal Emulators, VS Code, Firefox, Zen Browser, DMS UI, and Niri Compositor Window Rules.
+set-opacity: Unified Window Background Transparency Manager for CachyOS + Niri/Hyprland + DMS
+Automates background transparency for GTK3/4, Terminal Emulators, VS Code, Firefox, Zen Browser, DMS UI, and Niri/Hyprland Compositor Window Rules.
 """
 
 import os
@@ -33,6 +33,40 @@ MARKER_HASH_START = "# BEGIN DMS TRANSPARENCY"
 MARKER_HASH_END = "# END DMS TRANSPARENCY"
 MARKER_KDL_START = "// BEGIN DMS TRANSPARENCY"
 MARKER_KDL_END = "// END DMS TRANSPARENCY"
+MARKER_LUA_START = "-- BEGIN DMS TRANSPARENCY"
+MARKER_LUA_END = "-- END DMS TRANSPARENCY"
+
+# Windows the compositor opacity rule never applies to, on both Niri and Hyprland.
+# Regexes are matched against the Niri app-id / Hyprland class.
+EXCLUDED_APP_PATTERNS: List[str] = [
+    # Browsers
+    r"^firefox$",
+    r"^org\.mozilla\.firefox$",
+    r"^zen$",
+    r"^app\.zen_browser\.zen$",
+    r"^librewolf$",
+    r"^floorp$",
+    r"^google-chrome$",
+    r"^com\.google\.Chrome$",
+    r"^chrome-.*",
+    r"^chromium$",
+    r"^brave-browser$",
+    r"^vivaldi-stable$",
+    # Game launchers & games
+    r"^steam$",
+    r"^steam_app_\d+$",
+    r"^lutris$",
+    r"^net\.lutris\.Lutris$",
+    r"^heroic$",
+    r"^com\.heroicgameslauncher\.hgl$",
+    r"^com\.usebottles\.bottles$",
+    r"^faugus-launcher$",
+    r"^io\.github\.Faugus\.faugus-launcher$",
+    r"^org\.prismlauncher\.PrismLauncher$",
+    # DMS settings window (part of the shell)
+    r"^com\.danklinux\.dms$",
+]
+
 
 
 def parse_opacity_value(val_str: str) -> float:
@@ -128,30 +162,6 @@ menu,
     return updated
 
 
-def find_apps_with_own_rules(niri_dir: Path) -> List[str]:
-    """Finds all app-ids that have specific window rules in niri configuration files."""
-    app_ids = set(["code", "code-url-handler", "Code"])
-
-    files_to_check = [
-        niri_dir / "config.kdl",
-        niri_dir / "dms" / "windowrules.kdl",
-    ]
-
-    pattern = re.compile(r'match\s+app-id=(?:r#"?|r"?|["\']?)([^"\'\s#]+)(?:["\']?|"#)?')
-
-    for f in files_to_check:
-        if not f.exists():
-            continue
-        text = f.read_text(encoding="utf-8")
-        clean_text = re.sub(rf"{re.escape(MARKER_KDL_START)}.*?{re.escape(MARKER_KDL_END)}", "", text, flags=re.DOTALL)
-        for m in pattern.finditer(clean_text):
-            raw_id = m.group(1).strip()
-            clean_id = raw_id.lstrip('^').rstrip('$').replace(r'\.', '.')
-            if clean_id and not clean_id.endswith('.'):
-                app_ids.add(clean_id)
-
-    return sorted(list(app_ids))
-
 
 # ==========================================
 # NIRI COMPOSITOR WINDOW RULES HANDLER
@@ -174,8 +184,7 @@ def update_niri(opacity: float, dry_run: bool = False) -> Optional[str]:
     existing = target_file.read_text(encoding="utf-8") if target_file.exists() else ""
     alpha_str = f"{opacity:.2f}"
 
-    excluded_apps = find_apps_with_own_rules(niri_dir)
-    exclude_lines = "\n".join([f'    exclude app-id="{app}"' for app in excluded_apps])
+    exclude_lines = "\n".join([f'    exclude app-id=r#"{p}"#' for p in EXCLUDED_APP_PATTERNS])
 
     block = f"""{MARKER_KDL_START}
 window-rule {{
@@ -195,7 +204,7 @@ window-rule {{
     pattern = re.compile(rf"{re.escape(MARKER_KDL_START)}.*?{re.escape(MARKER_KDL_END)}", re.DOTALL)
 
     if pattern.search(existing):
-        new_content = pattern.sub(block, existing)
+        new_content = pattern.sub(lambda _: block, existing)
     else:
         new_content = (existing.strip() + "\n\n" + block).strip() + "\n"
 
@@ -208,6 +217,50 @@ window-rule {{
             pass
 
     return f"Niri Compositor Window Rules ({target_file.name})"
+
+
+# ==========================================
+# HYPRLAND COMPOSITOR WINDOW RULES HANDLER
+# ==========================================
+def update_hyprland(opacity: float, dry_run: bool = False) -> Optional[str]:
+    hypr_dir = CONFIG_DIR / "hypr"
+    hypr_config = hypr_dir / "hyprland.lua"
+    if not hypr_config.exists():
+        return None
+
+    # Hyprland applies rules top to bottom and the last match wins, so dms.opacity is required
+    # before the DMS window rules: any app with its own opacity rule keeps it.
+    require_line = 'require("dms.opacity")'
+    cfg_text = hypr_config.read_text(encoding="utf-8")
+    if require_line not in cfg_text:
+        anchor = re.search(r"^-- DMS_WINDOWRULES_BEGIN|^require\(\"dms\.", cfg_text, re.MULTILINE)
+        if anchor:
+            new_cfg = cfg_text[:anchor.start()] + require_line + "\n\n" + cfg_text[anchor.start():]
+        else:
+            new_cfg = cfg_text.rstrip() + "\n\n" + require_line + "\n"
+        if dry_run:
+            print(f"[DRY-RUN] Would add {require_line} to {hypr_config}\n")
+        else:
+            create_backup(hypr_config)
+            hypr_config.write_text(new_cfg, encoding="utf-8")
+
+    target_file = hypr_dir / "dms" / "opacity.lua"
+    alpha_str = f"{opacity:.2f}"
+    excluded_regex = "|".join(EXCLUDED_APP_PATTERNS)
+    lua_excluded = '"' + excluded_regex.replace("\\", "\\\\") + '"'
+
+    content = f"""{MARKER_LUA_START}
+-- Generated by set-opacity
+hl.window_rule({{ match = {{ class = ".*" }}, opacity = "{alpha_str}" }})
+-- Excluded apps stay opaque (last matching rule wins)
+hl.window_rule({{ match = {{ class = {lua_excluded} }}, opacity = "1.0" }})
+{MARKER_LUA_END}
+"""
+
+    # Hyprland reloads the config itself when DMS-managed files change, so no explicit reload here.
+    write_file_safe(target_file, content, dry_run)
+
+    return f"Hyprland Compositor Window Rules ({target_file.name})"
 
 
 
@@ -240,7 +293,7 @@ def update_vscode(opacity: float, dry_run: bool = False) -> List[str]:
             if write_file_safe(settings_file, new_content, dry_run):
                 updated.append(f"VS Code ({vdir.parent.name}) - colour theme background restored")
         else:
-            updated.append(f"VS Code ({vdir.parent.name}) - managed via Niri compositor")
+            updated.append(f"VS Code ({vdir.parent.name}) - managed via compositor window rules")
 
     return updated
 
@@ -298,7 +351,7 @@ user_pref("mod.sameerasw.zen_transparency_color", "{color_val}");
                 js_pattern = re.compile(rf"{re.escape(MARKER_HASH_START)}.*?{re.escape(MARKER_HASH_END)}", re.DOTALL)
                 
                 if js_pattern.search(user_js_existing):
-                    new_user_js = js_pattern.sub(user_js_snippet, user_js_existing)
+                    new_user_js = js_pattern.sub(lambda _: user_js_snippet, user_js_existing)
                 else:
                     new_user_js = (user_js_existing.strip() + "\n\n" + user_js_snippet).strip() + "\n"
                 
@@ -379,7 +432,7 @@ user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
                 js_pattern = re.compile(rf"{re.escape(MARKER_HASH_START)}.*?{re.escape(MARKER_HASH_END)}", re.DOTALL)
                 
                 if js_pattern.search(user_js_existing):
-                    new_user_js = js_pattern.sub(user_js_snippet, user_js_existing)
+                    new_user_js = js_pattern.sub(lambda _: user_js_snippet, user_js_existing)
                 else:
                     new_user_js = (user_js_existing.strip() + "\n\n" + user_js_snippet).strip() + "\n"
                 
@@ -478,7 +531,7 @@ def update_foot(opacity: float, dry_run: bool = False) -> Optional[str]:
     pattern = re.compile(rf"{re.escape(MARKER_HASH_START)}.*?{re.escape(MARKER_HASH_END)}", re.DOTALL)
 
     if pattern.search(existing):
-        new_content = pattern.sub(block, existing)
+        new_content = pattern.sub(lambda _: block, existing)
     else:
         new_content = (existing.strip() + "\n\n" + block).strip() + "\n"
 
@@ -508,7 +561,7 @@ def update_ghostty(opacity: float, dry_run: bool = False) -> Optional[str]:
     pattern = re.compile(rf"{re.escape(MARKER_HASH_START)}.*?{re.escape(MARKER_HASH_END)}", re.DOTALL)
 
     if pattern.search(existing):
-        new_content = pattern.sub(block, existing)
+        new_content = pattern.sub(lambda _: block, existing)
     else:
         new_content = (existing.strip() + "\n\n" + block).strip() + "\n"
 
@@ -531,7 +584,7 @@ def update_wezterm(opacity: float, dry_run: bool = False) -> Optional[str]:
     pattern = re.compile(rf"{re.escape(MARKER_HASH_START)}.*?{re.escape(MARKER_HASH_END)}", re.DOTALL)
 
     if pattern.search(existing):
-        new_content = pattern.sub(block, existing)
+        new_content = pattern.sub(lambda _: block, existing)
     elif existing:
         new_content = (existing.strip() + "\n\n" + block).strip() + "\n"
     else:
@@ -556,6 +609,13 @@ def get_status():
         else:
             print("  - Niri Opacity: Default (No custom window rule)")
 
+    # Check Hyprland
+    hypr_rules = CONFIG_DIR / "hypr" / "dms" / "opacity.lua"
+    if hypr_rules.exists():
+        match = re.search(r'opacity\s*=\s*"([\d.]+)', hypr_rules.read_text(encoding="utf-8"))
+        if match:
+            print(f"  - Hyprland Global Window Rule Opacity: {match.group(1)}")
+
     # Check GTK
     gtk_css = CONFIG_DIR / "gtk-3.0" / "gtk.css"
     if gtk_css.exists():
@@ -569,7 +629,7 @@ def get_status():
         if "#00000000" in vscode_set.read_text(encoding="utf-8"):
             print("  - VS Code Opacity: Warning: #00000000 theme override present")
         else:
-            print("  - VS Code Opacity: Managed via Niri Compositor (Colour Theme Preserved)")
+            print("  - VS Code Opacity: Managed via compositor window rules (Colour Theme Preserved)")
 
     # Check Firefox
     firefox_dirs = [
@@ -639,7 +699,7 @@ def install_script():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Unified Window Background Transparency Manager for CachyOS + Niri + DMS + VS Code + Firefox",
+        description="Unified Window Background Transparency Manager for CachyOS + Niri/Hyprland + DMS + VS Code + Firefox",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -677,10 +737,14 @@ Examples:
 
     updated_targets = []
 
-    # Apply updates to Niri, GTK, VS Code, Firefox, Zen Browser & Terminals
+    # Apply updates to Niri, Hyprland, GTK, VS Code, Firefox, Zen Browser & Terminals
     niri_res = update_niri(opacity, args.dry_run)
     if niri_res:
         updated_targets.append(niri_res)
+
+    hypr_res = update_hyprland(opacity, args.dry_run)
+    if hypr_res:
+        updated_targets.append(hypr_res)
 
     updated_targets.extend(update_gtk_css(opacity, args.dry_run))
     updated_targets.extend(update_vscode(opacity, args.dry_run))
