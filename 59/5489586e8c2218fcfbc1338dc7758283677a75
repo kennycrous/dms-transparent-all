@@ -1,0 +1,25 @@
+set-opacity
+  s_83a7a5b9bc711a::t_7fef59f4ff43bc 222-248,251-254,257-265
+  s_83a7a5b9bc711a::t_90c149861aea85 249
+  s_83a7a5b9bc711a::t_d7ec2ac2020c43 3-4,36-37,296,612-618,632,702,740,745-747
+  s_83a7a5b9bc711a::t_e8c46b3a51f03c 39-65,68-69,250,256
+  s_83a7a5b9bc711a::t_adfb3be79b4dbc 66-67,187,255
+  s_83a7a5b9bc711a::t_3dd5909d8105f2 207,354,435,534,564,587
+  s_83a7a5b9bc711a::t_d5fb00c12f567e 38,748
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "595489586e8c2218fcfbc1338dc7758283677a75",
+  "prompts": {},
+  "sessions": {
+    "s_83a7a5b9bc711a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6ac24fc-35bf-4adb-8323-9bc50eb32fb9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Kenny Crous <kennycrous@oulook.com>"
+    }
+  }
+}
